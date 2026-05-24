@@ -1,0 +1,168 @@
+---
+title: "Coke Zero vs Pepsi Zero/Max — Reddit Difference-in-Differences"
+format: pdf
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r setup}
+if (!requireNamespace("here", quietly = TRUE))
+  install.packages("here", repos = "https://cloud.r-project.org")
+
+library(here)
+library(readr)
+library(dplyr)
+library(stringr)
+
+reddit <- read_csv(here("data", "coke_pepsi_reddit_all.csv"))
+glimpse(reddit)
+```
+
+## Exercise 2(c)
+
+```{r}
+#| label: ex-2c-filter
+reddit |>
+  filter(subreddit == "cocacola") |>
+  glimpse()
+```
+
+## Exercise 2(d)
+
+```{r}
+#| label: ex-2d-summary
+# (1) Total row count
+nrow(reddit)
+
+# (2) Share of posts vs. comments
+reddit |>
+  count(type) |>
+  mutate(share = n / sum(n))
+
+# (3) Date range of created_utc
+range(as.POSIXct(reddit$created_utc, origin = "1970-01-01", tz = "UTC"))
+```
+
+## Exercise 2(e)
+
+```{r}
+#| label: ex-2e-slice
+cocacola <- reddit |>
+  filter(subreddit == "cocacola") |>
+  mutate(date = format(as.POSIXct(created_utc, origin = "1970-01-01", tz = "UTC"), "%Y-%m-%d"))
+
+top3_comments <- cocacola |> filter(type == "comment") |> arrange(created_utc) |> slice(1:3)
+top3_posts    <- cocacola |> filter(type == "post")    |> arrange(created_utc) |> slice(1:3)
+
+bind_rows(top3_comments, top3_posts) |>
+  select(type, subreddit, author, title, text, score, date)
+```
+
+```{r}
+#| label: ex-2e-typeset
+#| results: asis
+print_rows <- function(df, section_title) {
+  cat(sprintf("### %s\n\n", section_title))
+  for (i in seq_len(nrow(df))) {
+    r        <- df[i, ]
+    raw_text <- if (is.na(r$text)) "" else r$text
+    body     <- if (nchar(trimws(raw_text)) == 0) "*[no text]*" else raw_text
+    score    <- if (is.na(r$score)) "NA" else as.character(r$score)
+    title    <- if (is.na(r$title)) "" else r$title
+    if (r$type == "post" && nchar(trimws(title)) > 0) {
+      cat(sprintf("**%s | u/%s | r/%s | score: %s | %s**\n\n",
+                  title, r$author, r$subreddit, score, r$date))
+    } else {
+      cat(sprintf("**[comment] u/%s | r/%s | score: %s | %s**\n\n",
+                  r$author, r$subreddit, score, r$date))
+    }
+    cat(body, "\n\n---\n\n")
+  }
+}
+
+print_rows(top3_comments, "Earliest 3 Comments — r/cocacola")
+print_rows(top3_posts,    "Earliest 3 Posts — r/cocacola")
+```
+
+## Exercise 3(a)
+
+```{r}
+#| label: ex-3a-strip
+# Save original text before cleaning
+text_orig <- reddit$text
+
+clean_text <- function(x) {
+  x |>
+    # Markdown links [text](url) — keep inner text, drop URL
+    str_remove_all("\\[([^\\]]+)\\]\\([^)]+\\)") |>
+    str_replace_all("\\[([^\\]]+)\\]\\([^)]+\\)", "\\1") |>
+    # Bare URLs
+    str_remove_all("https?://\\S+") |>
+    # User and subreddit mentions
+    str_remove_all("(?i)\\bu/\\S+") |>
+    str_remove_all("(?i)\\br/\\S+") |>
+    # Emphasis chars (**, *, _, `) — keep inner text
+    str_remove_all("[*_`]+") |>
+    # Header chars at line start
+    str_remove_all("(?m)^#+\\s*") |>
+    # HTML entities
+    str_replace_all("&amp;",  "&") |>
+    str_replace_all("&lt;",   "<") |>
+    str_replace_all("&gt;",   ">") |>
+    str_replace_all("&quot;", "\"") |>
+    str_replace_all("&nbsp;", " ") |>
+    # Collapse runs of whitespace (preserving line breaks is fine)
+    str_replace_all("[ \t]+", " ") |>
+    str_trim()
+}
+
+chars_before <- sum(nchar(reddit$text), na.rm = TRUE) +
+                sum(nchar(reddit$title), na.rm = TRUE)
+
+reddit <- reddit |>
+  mutate(
+    text  = clean_text(text),
+    title = clean_text(title)
+  )
+
+chars_after <- sum(nchar(reddit$text), na.rm = TRUE) +
+               sum(nchar(reddit$title), na.rm = TRUE)
+
+cat(sprintf(
+  "Characters before cleaning: %s\nCharacters after cleaning:  %s\nCharacters removed:         %s\n",
+  format(chars_before, big.mark = ","),
+  format(chars_after,  big.mark = ","),
+  format(chars_before - chars_after, big.mark = ",")
+))
+```
+
+## Exercise 3(b)
+
+```{r}
+#| label: ex-3b-pass1
+# Pass 1: cross-posting — same text + author across any subreddit
+n_before <- nrow(reddit)
+reddit   <- distinct(reddit, text, author, .keep_all = TRUE)
+n_after  <- nrow(reddit)
+cat(sprintf("Pass 1 (cross-posting: same text + author)\n  Before:  %d\n  After:   %d\n  Dropped: %d\n",
+            n_before, n_after, n_before - n_after))
+```
+
+```{r}
+#| label: ex-3b-pass2
+# Pass 2: coordinated inauthentic behavior — same text + subreddit across any author
+n_before <- nrow(reddit)
+reddit   <- distinct(reddit, text, subreddit, .keep_all = TRUE)
+n_after  <- nrow(reddit)
+cat(sprintf("Pass 2 (coordinated: same text + subreddit)\n  Before:  %d\n  After:   %d\n  Dropped: %d\n",
+            n_before, n_after, n_before - n_after))
+```
+
+```{r}
+#| label: ex-3b-write
+# Write cleaned corpus for Part 3
+write_csv(reddit, here("data", "coke_pepsi_reddit_cleaned.csv"))
+cat(sprintf("Wrote %d rows to data/coke_pepsi_reddit_cleaned.csv\n", nrow(reddit)))
+```
