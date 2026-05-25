@@ -1,0 +1,102 @@
+## Exercise 4
+
+We set up an OpenAI API key at platform.openai.com, loaded \$19 of credit, and saved the key as `OPENAI_API_KEY` in `~/.Renviron`. The key was verified with `Sys.getenv("OPENAI_API_KEY")` in the R console. We use the OpenAI API rather than Anthropic's because at the time of writing, `gpt-5-mini` is roughly one-quarter the price of Claude Haiku, and the GABRIEL methodology we follow uses OpenAI throughout.
+
+## Exercise 5
+
+```{r}
+#| label: ex-5-trim
+reddit <- read_csv("/Users/codyzheng_1/Desktop/my-r-project/data/coke_pepsi_reddit_cleaned.csv",
+                   show_col_types = FALSE)
+
+threshold <- quantile(nchar(reddit$text), 0.99, na.rm = TRUE)
+
+n_before <- nrow(reddit)
+reddit   <- reddit |> filter(is.na(text) | nchar(text) <= threshold)
+n_after  <- nrow(reddit)
+
+cat(sprintf("Cleaned CSV rows : %d\nTrimmed CSV rows : %d\nDropped          : %d\n",
+            n_before, n_after, n_before - n_after))
+
+write_csv(reddit, "/Users/codyzheng_1/Desktop/my-r-project/data/coke_pepsi_reddit_trimmed.csv")
+```
+
+The top 1% of posts by character length were removed, dropping 539 rows from 54,445 to 53,906. Posts in the top 1% contain at least \~1,500 words versus a median of \~34 words — roughly 45x longer than a typical post.
+
+## Exercise 6
+
+```{r}
+#| label: ex-6-cost
+# (a) AI cost estimate
+n               <- nrow(reddit)
+avg_tok         <- mean(nchar(reddit$text), na.rm = TRUE) / 4
+fixed_prompt_in <- 800
+T_in            <- n * (avg_tok + fixed_prompt_in)
+tokens_out      <- 30
+T_out           <- n * tokens_out
+p_in            <- 0.25
+p_out           <- 2.00
+floor_h         <- T_in / 200000 / 60
+cost            <- T_in / 1e6 * p_in + T_out / 1e6 * p_out
+
+# (b) Human cost estimate
+total_words  <- sum(str_count(reddit$text, "[^[:space:]]+"), na.rm = TRUE)
+wpm          <- 238
+min_per_item <- 2
+wage         <- 15
+platform_fee <- 0.20
+n_trim       <- n
+human_hours  <- (total_words / wpm + n_trim * min_per_item) / 60
+human_cost   <- human_hours * wage * (1 + platform_fee)
+
+cat(sprintf(
+"=== AI vs Human Comparison ===
+AI hours   : %.1f h       Human hours : %.0f h     Time reduction  : %.1f%%
+AI cost    : $%.2f       Human cost  : $%.0f    Cost reduction  : %.1f%%\n",
+  floor_h, human_hours, (human_hours - floor_h) / human_hours * 100,
+  cost,    human_cost,  (human_cost  - cost)    / human_cost  * 100
+))
+```
+
+The AI approach costs \$15.59 and takes 4.1 hours at the rate-limit floor, compared to \$38,118 and 2,118 person-hours for a human annotator — a 99.8% reduction in time and near-total cost elimination. At this scale, manual labeling is economically infeasible; LLMs make the analysis tractable.
+
+## Exercise 7
+
+Each row in the trimmed corpus was classified using a single API call to `gpt-5-mini`. The prompt instructed the model to determine whether the text contained a complaint specifically about the row's focal beverage (Coke Zero for treatment rows, Pepsi Zero/Max for control rows), and if so, to extract a verbatim 3–8 word phrase naming the complaint subject. Neutral mentions, recipes, questions, and praise of other brands were explicitly excluded. The production script (`code/reddit_classification.R`) used parallel processing with 10 workers via the `furrr` package and a checkpoint system to allow resumption after interruption.
+
+```{r}
+#| label: ex-7-summary
+extracted <- read_csv("/Users/codyzheng_1/Desktop/my-r-project/data/coke_pepsi_reddit_extracted_42000.csv",
+                      show_col_types = FALSE)
+
+cat(sprintf(
+"=== Classification Summary ===
+Total rows        : %d
+Complaints        : %d (%.1f%%)
+Non-empty subject : %d\n",
+  nrow(extracted),
+  sum(extracted$is_complaint == TRUE, na.rm = TRUE),
+  mean(extracted$is_complaint == TRUE, na.rm = TRUE) * 100,
+  sum(nchar(extracted$complaint_subject) > 0, na.rm = TRUE)
+))
+```
+
+## Exercise 8
+
+The bucketing procedure followed a two-stage pipeline described in the GABRIEL framework. In Stage 1, all unique `complaint_subject` phrases from Coke Zero complaints were sent in a single API call to `gpt-5.5` with high reasoning effort, which proposed 16 mutually exclusive bucket categories (specific, directional, non-overlapping). In Stage 2, `gpt-5.4-mini` classified each phrase into one of the 16 buckets using batch calls of 100 phrases each. The bucket schema was saved to `data/coke_pepsi_reddit_buckets_meta.json`.
+
+```{r}
+#| label: ex-8-load
+reddit <- read_csv("/Users/codyzheng_1/Desktop/my-r-project/data/coke_pepsi_reddit_bucketed.csv",
+                   show_col_types = FALSE)
+
+cat(sprintf("Total rows: %d\n", nrow(reddit)))
+cat(sprintf("Coke Zero complaints: %d\n",
+            sum(reddit$group == "treatment" & reddit$is_complaint == TRUE, na.rm = TRUE)))
+
+cat("\nBucket counts (Coke Zero complaints):\n")
+reddit |>
+  filter(group == "treatment", is_complaint == TRUE) |>
+  count(complaint_bucket, sort = TRUE) |>
+  print(n = 20)
+```
